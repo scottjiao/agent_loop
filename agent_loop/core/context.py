@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agent_loop.core.types import AgentConfig, Message, Role, ToolResult
 
 
@@ -12,6 +14,7 @@ class Context:
         self._config = config
         self._messages: list[Message] = []
         self._skill_instructions: list[str] = []
+        self.extra: dict[str, Any] = {}
 
     # -- Message management -------------------------------------------------
 
@@ -58,25 +61,36 @@ class Context:
 
     # -- Serialization for LLM calls ----------------------------------------
 
-    def to_openai_messages(self) -> list[dict]:
-        """Build the messages list for an OpenAI-compatible API call."""
-        result: list[dict] = [
-            {"role": "system", "content": self.build_system_prompt()}
-        ]
+    def messages_with_system_prompt(self) -> list[Message]:
+        """Build the full message list (system prompt + history) for an LLM call.
+
+        Returns internal ``Message`` objects.  Format-specific serialization
+        is handled by the ``ChatFormat`` owned by the ``LLMClient``.
+        """
+        system = Message(role=Role.SYSTEM, content=self.build_system_prompt())
         # Apply sliding window truncation.
         msgs = self._messages
         max_msgs = self._config.max_context_messages
         if len(msgs) > max_msgs:
             msgs = msgs[-max_msgs:]
-        for msg in msgs:
-            result.append(msg.to_openai_dict())
-        return result
+        return [system] + list(msgs)
+
+    def to_openai_messages(self) -> list[dict]:
+        """Build the messages list for an OpenAI-compatible API call.
+
+        .. deprecated::
+            Use ``messages_with_system_prompt()`` instead.  This convenience
+            method is kept for backward compatibility but is no longer called
+            by the core agent loop.
+        """
+        return [m.to_openai_dict() for m in self.messages_with_system_prompt()]
 
     # -- Utilities ----------------------------------------------------------
 
     def clear(self) -> None:
         self._messages.clear()
         self._skill_instructions.clear()
+        self.extra.clear()
 
     @property
     def message_count(self) -> int:

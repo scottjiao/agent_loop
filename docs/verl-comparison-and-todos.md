@@ -54,52 +54,51 @@ class ToolParser(ABC):
 
 **建议方案**：在 `LLMClient` 层增加可插拔的 `ToolCallExtractor` 接口。默认实现依赖 API 结构化输出；可切换为 regex 解析器。这让框架同时支持 API 模式和 raw-token 模式。
 
-### 2.2 Tool Response 截断策略 ⭐⭐⭐
+### 2.2 Tool Response 截断策略 ⭐⭐⭐ ✅ 已实现
 
 **问题**：工具返回内容可能非常长（网页抓取、代码搜索结果等），直接塞入上下文会导致 token 超限或浪费预算。
 
-**verl 的做法**：
+**实现**：在 `_handle_observing()` 中，ON_OBSERVE hook 之后、写入 context 之前，作为最终保底截断。通过 `AgentConfig` 配置：
+
 ```python
-if len(tool_response_text) > self.max_tool_response_length:
-    if self.tool_response_truncate_side == "left":
-        tool_response_text = tool_response_text[:max_len] + "...(truncated)"
-    elif self.tool_response_truncate_side == "right":
-        tool_response_text = "(truncated)..." + tool_response_text[-max_len:]
-    else:  # middle
-        half = max_len // 2
-        tool_response_text = tool_response_text[:half] + "...(truncated)..." + tool_response_text[-half:]
+AgentConfig(
+    max_tool_response_length=4000,        # None = 不截断
+    tool_response_truncate_side="middle",  # "left" | "right" | "middle"
+)
 ```
 
-**实现位置**：应在 `_handle_observing()` 中，写入 context 之前执行截断。可作为 `AgentConfig` 的可选参数：
-```python
-@dataclass
-class AgentConfig:
-    max_tool_response_length: int | None = None  # None = 不截断
-    tool_response_truncate_side: str = "middle"   # "left" | "right" | "middle"
-```
+截断策略支持三种模式：
+- `left`：保留前 N 字符 + `...(truncated)`
+- `right`：`(truncated)...` + 保留后 N 字符
+- `middle`：保留前后各半 + `...(truncated)...`
 
-### 2.3 并行工具执行上限 ⭐⭐
+### 2.3 并行工具执行上限 ⭐⭐ ✅ 已实现
 
 **问题**：模型可能一次请求调用大量工具，无限并发会给外部服务造成压力。
 
-**verl 的做法**：
+**实现**：采用 `asyncio.Semaphore` 资源池模式（而非 verl 的简单 slice 丢弃），所有 tool call 都会执行，但同时并发不超过 N 个，超出的排队等待：
+
 ```python
-for tool_call in agent_data.tool_calls[:self.max_parallel_calls]:
-    tasks.append(self._call_tool(tool_call, ...))
-responses = await asyncio.gather(*tasks)
+# AgentConfig
+AgentConfig(max_parallel_tool_calls=5)  # None = 无限制
+
+# ToolRouter.execute_many() 内部
+semaphore = asyncio.Semaphore(max_concurrency)
+async def _limited(call):
+    async with semaphore:
+        return await self.execute(call)
+return list(await asyncio.gather(*(_limited(c) for c in calls)))
 ```
 
-**建议**：在 `AgentConfig` 中增加 `max_parallel_tool_calls: int = 10`，在 `_handle_acting()` 中对 `tool_calls` 切片后再传给 `router.execute_many()`。
+与 verl 的关键差异：verl 用 slice 直接丢弃超出的 tool call，我们用 semaphore 让所有调用都执行，只是控制并发度。
 
-### 2.4 AgentData — 显式状态包传递给 Tool ⭐⭐
+### 2.4 AgentData — 显式状态包传递给 Tool ⭐⭐ ✅ 部分实现
 
 **问题**：某些工具需要访问对话上下文（比如 SWE-agent 工具需要知道之前的操作历史）。我们当前的 `ToolProvider.call_tool(name, arguments)` 签名不允许传递额外上下文。
 
-**verl 的做法**：`AgentData` 包含 messages、metrics、extra_fields 等，直接传给 `tool.execute(instance_id, tool_args, agent_data=agent_data)`。
+**已实现**：`Context.extra: dict[str, Any]` 扩展字段，`clear()` 时自动清空。hooks、tools、skills 可通过它传递任意上下文。
 
-**建议**：不需要引入完整的 `AgentData`，但可以：
-1. 在 `Context` 上增加 `extra_fields: dict[str, Any]` 扩展字段
-2. 在 `ToolRouter.execute()` 中支持可选的 `context` 参数传递
+**待做**：在 `ToolRouter.execute()` 中支持可选的 `context` 参数传递，让工具能直接访问 `context.extra`。
 
 ### 2.5 Token 级响应追踪 ⭐⭐
 
@@ -156,200 +155,73 @@ if tool_selection:
 
 ## 4. 实施优先级
 
-| 优先级 | 改进项 | 实现位置 | 复杂度 | 理由 |
+| 优先级 | 改进项 | 实现位置 | 复杂度 | 状态 |
 |--------|--------|----------|--------|------|
-| **P0** | **ChatFormat 协议 — 统一消息/schema/解析/结果格式** | 新建 `core/chat_format.py` + 重构 Agent | 中 | 框架通用性的根基；当前四处硬绑 OpenAI 格式，无法支持开源模型 |
-| **P0** | Tool response 截断 | `agent.py` `_handle_observing()` + `AgentConfig` | 低 | 防止上下文爆炸，任何生产使用都需要 |
-| **P0** | 并行 tool 执行上限 | `agent.py` `_handle_acting()` + `AgentConfig` | 低 | 防止对外部服务造成 DDoS |
-| **P1** | Context extra_fields | `context.py` | 低 | 让 tool 可以访问/存储会话级状态 |
-| **P2** | Token 级追踪 | 新建 `telemetry.py` 或通过 hook | 中 | 可观测性，未来 RL 集成基础 |
-| **P2** | Per-request tool filtering | `agent.py` `run()` 参数 | 低 | 动态控制可用工具 |
-| **P3** | Interactive / multi-turn | `agent.py` 新方法或 hook | 中 | 环境交互、多用户轮次 |
-| **P3** | 多模态 Message | `types.py` 字段预留 | 低 | 未来 VLM agent 的基础 |
+| **P0** | ~~ChatFormat 协议 — 统一消息/schema/解析/结果格式~~ | `core/chat_format.py` + Agent/LLMClient/Context 重构 | 中 | ✅ 已完成 |
+| **P0** | ~~Tool response 截断~~ | `agent.py` `_handle_observing()` + `AgentConfig` | 低 | ✅ 已完成 |
+| **P0** | ~~并行 tool 执行上限~~ | `agent.py` `_handle_acting()` + `ToolRouter` + `AgentConfig` | 低 | ✅ 已完成 |
+| **P1** | ~~Context extra_fields~~ | `context.py` | 低 | ✅ 已完成 |
+| **P2** | Token 级追踪 | 新建 `telemetry.py` 或通过 hook | 中 | 待实现 |
+| **P2** | Per-request tool filtering | `agent.py` `run()` 参数 | 低 | 待实现 |
+| **P3** | Interactive / multi-turn | `agent.py` 新方法或 hook | 中 | 待实现 |
+| **P3** | 多模态 Message | `types.py` 字段预留 | 低 | 待实现 |
 
 ---
 
-## 5. P0 实现草案
+## 5. P0/P1 实现记录
 
-### 5.1 Tool Response 截断
+### 5.1 Tool Response 截断 — ✅ 已实现
 
-```python
-# core/types.py — AgentConfig 新增字段
-@dataclass
-class AgentConfig:
-    max_tool_response_length: int | None = None
-    tool_response_truncate_side: str = "middle"  # "left" | "right" | "middle"
+**位置**：`core/agent.py` `_truncate_tool_response()` + `_handle_observing()`
 
-# core/agent.py — _handle_observing() 中截断
-def _truncate_tool_response(self, content: str) -> str:
-    max_len = self.config.max_tool_response_length
-    if max_len is None or len(content) <= max_len:
-        return content
-    side = self.config.tool_response_truncate_side
-    if side == "left":
-        return content[:max_len] + "...(truncated)"
-    elif side == "right":
-        return "(truncated)..." + content[-max_len:]
-    else:
-        half = max_len // 2
-        return content[:half] + "...(truncated)..." + content[-half:]
-```
-
-### 5.2 并行 Tool 执行上限
+关键设计决策：截断放在 ON_OBSERVE hook **之后**、写入 context **之前**，作为最终保底。
+这样 hook 可以做自定义处理（比如摘要、结构化提取），截断只防止极端情况。
 
 ```python
-# core/types.py — AgentConfig 新增字段
-@dataclass
-class AgentConfig:
-    max_parallel_tool_calls: int = 10
+# AgentConfig 新增字段
+max_tool_response_length: int | None = None  # None = 不截断
+tool_response_truncate_side: str = "middle"  # "left" | "right" | "middle"
 
-# core/agent.py — _handle_acting() 中切片
-tool_calls = tool_calls[:self.config.max_parallel_tool_calls]
-results = await self.router.execute_many(tool_calls)
+# _handle_observing() 中，对每个 result 截断后再写入 context
+r = ToolResult(
+    tool_call_id=r.tool_call_id, name=r.name,
+    content=self._truncate_tool_response(r.content),
+    is_error=r.is_error,
+)
 ```
 
-### 5.3 ChatFormat 协议 — 统一消息/schema/解析/结果格式
+### 5.2 并行 Tool 执行上限 — ✅ 已实现
 
-#### 5.3.1 问题：四处硬绑 OpenAI 格式
+**位置**：`tools/base.py` `ToolRouter.execute_many()` + `core/agent.py` `_handle_acting()`
 
-当前代码中有四个耦合点把框架锁死在 OpenAI API 格式上：
-
-| 位置 | 现状 | 问题 |
-|------|------|------|
-| `Message.to_openai_dict()` | 直接输出 OpenAI message 格式 | Anthropic、本地模型的 message 格式不同 |
-| `ToolSpec.to_openai_schema()` | 只有 OpenAI function calling schema | Hermes 用 JSON-in-XML，Qwen3 用自定义 XML |
-| `Context.to_openai_messages()` | 写死了序列化方式 | 不同模型的 system prompt 处理方式不同 |
-| `Agent._handle_planning()` | 假设 `response.message.tool_calls` 已结构化 | 开源模型在纯文本中嵌入 tool call token |
-
-verl 的 `ToolParser` 只解决了第四个问题（输出解析），其余三个散落各处。
-
-#### 5.3.2 方案：ChatFormat 策略对象
-
-把一种 LLM 格式的**所有**格式约定收拢到一个可替换的策略对象中：
+关键设计决策：使用 `asyncio.Semaphore` 资源池模式，而非 verl 的 slice 丢弃。
+所有 tool call 都会执行，只是控制并发度，超出的排队等待。
 
 ```python
-# core/chat_format.py
+# AgentConfig 新增字段
+max_parallel_tool_calls: int | None = None  # None = 无限制
 
-class ChatFormat(ABC):
-    """定义一种 LLM 对话格式的完整协议。"""
-    
-    @abstractmethod
-    def serialize_messages(
-        self, messages: list[Message], tools: list[ToolSpec] | None = None
-    ) -> Any:
-        """把内部 Message 列表序列化成 LLM 需要的输入格式。
-        
-        OpenAI    → list[dict]  (标准 message dicts)
-        本地模型  → apply_chat_template 后的 token ids 或 prompt string
-        Anthropic → Anthropic 格式的 message list
-        """
-    
-    @abstractmethod
-    def serialize_tool_schema(self, spec: ToolSpec) -> Any:
-        """把 ToolSpec 转成该格式的 tool 描述。
-        
-        OpenAI → {"type": "function", "function": {...}}
-        Hermes → 嵌入 system prompt 的文本描述
-        """
-    
-    @abstractmethod
-    def extract_tool_calls(self, response: LLMResponse) -> list[ToolCall]:
-        """从 LLM 响应中提取工具调用。
-        
-        OpenAI → 读 response.message.tool_calls (结构化字段)
-        Hermes → regex 解析 <tool_call>JSON</tool_call>
-        Qwen3  → XML 解析 <function=name><parameter=key>value</parameter></function>
-        """
-    
-    @abstractmethod
-    def format_tool_result(self, result: ToolResult) -> Message:
-        """把工具执行结果格式化为对话消息。
-        
-        OpenAI → Message(role=TOOL, tool_call_id=..., content=...)
-        Hermes → Message(role=USER, content="<tool_response>...</tool_response>")
-        gpt-oss → 特殊 token 手动拼接
-        """
+# ToolRouter.execute_many(calls, max_concurrency=N)
+semaphore = asyncio.Semaphore(max_concurrency)
+async def _limited(call):
+    async with semaphore:
+        return await self.execute(call)
+return list(await asyncio.gather(*(_limited(c) for c in calls)))
 ```
 
-提供默认实现：
+### 5.3 Context extra_fields — ✅ 已实现
 
-```python
-class OpenAIChatFormat(ChatFormat):
-    """默认实现 — 等价于当前硬编码的行为，零行为变更。"""
-    
-    def serialize_messages(self, messages, tools=None):
-        result = []
-        for msg in messages:
-            result.append(msg.to_openai_dict())
-        return result
-    
-    def serialize_tool_schema(self, spec):
-        return spec.to_openai_schema()
-    
-    def extract_tool_calls(self, response):
-        return response.message.tool_calls or []
-    
-    def format_tool_result(self, result):
-        return Message(
-            role=Role.TOOL,
-            content=result.content,
-            tool_call_id=result.tool_call_id,
-            name=result.name,
-        )
+**位置**：`core/context.py`
 
+`Context.extra: dict[str, Any]`，`clear()` 时自动清空。
+hooks、tools、skills 可通过它传递任意上下文数据。
 
-class HermesChatFormat(ChatFormat):
-    """Hermes 格式 — <tool_call>JSON</tool_call>，对应 verl 的 HermesToolParser。"""
-    ...
+### 5.4 ChatFormat 协议 — ✅ 已实现
 
-class Qwen3ChatFormat(ChatFormat):
-    """Qwen3 格式 — <tool_call><function=...>...</function></tool_call>。"""
-    ...
-```
-
-#### 5.3.3 Agent 中的使用
-
-```python
-class Agent:
-    def __init__(self, llm, tools, chat_format: ChatFormat | None = None, ...):
-        self.chat_format = chat_format or OpenAIChatFormat()
-    
-    async def _handle_planning(self):
-        # 序列化用 chat_format，不再硬写 to_openai_messages()
-        messages = self.chat_format.serialize_messages(
-            self.context.messages_with_system_prompt(),
-            self.router.tool_specs,
-        )
-        response = await self.llm.chat(messages=messages, ...)
-        
-        # 解析 tool calls 用 chat_format，不再假设结构化输出
-        tool_calls = self.chat_format.extract_tool_calls(response)
-    
-    async def _handle_observing(self):
-        for r in results:
-            # 格式化 tool result 用 chat_format
-            msg = self.chat_format.format_tool_result(r)
-            self.context.add_message(msg)
-```
-
-#### 5.3.4 与 verl ToolParser 的对比
-
-| 维度 | verl `ToolParser` | 我们的 `ChatFormat` |
-|------|-------------------|---------------------|
-| 覆盖范围 | 只管输出解析（extract_tool_calls） | 消息序列化 + schema 格式 + 输出解析 + 结果格式，完整闭环 |
-| 内聚性 | 解析逻辑独立，其余散落各处 | 同一种格式的四个维度在一个类中定义 |
-| Message 格式 | 硬编码 OpenAI dict | `serialize_messages()` 可适配任意格式 |
-| Tool schema | 硬传 `list[dict]` | `serialize_tool_schema()` 按格式转换 |
-| 注册机制 | `ToolParser._registry` 类级注册表 | 直接传入 Agent 构造函数，简单直接 |
-
-#### 5.3.5 迁移策略
-
-1. 新建 `core/chat_format.py`，实现 `ChatFormat` ABC + `OpenAIChatFormat`
-2. `Agent.__init__` 增加 `chat_format` 参数，默认 `OpenAIChatFormat()`
-3. `_handle_planning` / `_handle_observing` 改用 `self.chat_format.*`
-4. `Message.to_openai_dict()` 和 `ToolSpec.to_openai_schema()` 保留但标记为 convenience method
-5. `Context.to_openai_messages()` 改名为 `Context.messages_with_system_prompt()`，返回 `list[Message]` 而非 `list[dict]`
-6. **现有代码行为完全不变**（`OpenAIChatFormat` 复现当前逻辑）
+> 详见 `docs/chat-format.md` 和 `core/chat_format.py`。
+>
+> 最终方案与原始草案的关键差异：**ChatFormat 由 LLMClient 持有**，而非 Agent 持有。
+> `LLMClient.chat()` 签名改为接受 `list[Message]` 内部类型，Agent 完全不接触格式逻辑。
 
 ---
 

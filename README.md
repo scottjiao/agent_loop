@@ -9,6 +9,7 @@ A minimal, state-machine-driven agent loop framework for building tool-using LLM
 - **Skill system** — bundle prompt instructions + hook handlers + tool metadata into reusable behavior modules.
 - **Provider-agnostic tools** — `ToolProvider` abstraction supports local Python functions, MCP servers, and custom backends through a unified `ToolRouter`.
 - **Pluggable LLM backend** — abstract `LLMClient` interface; swap OpenAI for any compatible provider.
+- **ChatFormat protocol** — all format-specific knowledge (message serialization, tool schema, tool-call parsing, tool-result formatting) is encapsulated in a single replaceable `ChatFormat` object owned by the `LLMClient`. Enables train/inference consistency and cross-model portability.
 - **Zero heavy dependencies** — core has no required dependencies. `openai` is optional.
 
 ## Architecture
@@ -17,13 +18,14 @@ A minimal, state-machine-driven agent loop framework for building tool-using LLM
 Agent
 ├── StateMachine        INIT → PLANNING → ACTING → OBSERVING → REFLECTING → FINISHED
 │   └── Transition rules, on_enter/on_exit hooks, history tracking
-├── Context             Message history, system prompt assembly, sliding-window truncation
+├── Context             Message history, system prompt assembly, sliding-window truncation, extra fields
 ├── HookRegistry        Priority-ordered handlers at 9 hook points
 ├── SkillManager        Register/activate skills by state, collect instructions
-├── ToolRouter          Aggregate multiple ToolProviders, deduplicate, route calls
+├── ToolRouter          Aggregate multiple ToolProviders, deduplicate, route calls, semaphore concurrency
 │   ├── LocalToolProvider   Python functions via decorators
 │   └── MCPToolProvider     MCP servers via stdio JSON-RPC
-└── LLMClient           Abstract chat interface (OpenAI implementation provided)
+└── LLMClient           Abstract chat interface; owns a ChatFormat for serialization
+    └── ChatFormat      Pluggable message/tool format protocol (OpenAI, Hermes, Qwen3, …)
 ```
 
 ### State Machine
@@ -57,12 +59,13 @@ INIT ──→ PLANNING ──→ ACTING ──→ OBSERVING ──→ REFLECTIN
 agent_loop/
 ├── core/
 │   ├── agent.py           # Main Agent class — orchestrates the loop
+│   ├── chat_format.py     # ChatFormat ABC + OpenAIChatFormat default
 │   ├── state_machine.py   # Declarative state machine with hooks
 │   ├── context.py         # Message history and prompt assembly
 │   ├── hooks.py           # Event + priority hook system
 │   └── types.py           # Shared types (State, Message, ToolCall, ToolSpec, ...)
 ├── llm/
-│   ├── base.py            # Abstract LLMClient protocol
+│   ├── base.py            # Abstract LLMClient protocol (accepts list[Message])
 │   └── openai.py          # OpenAI-compatible implementation
 ├── tools/
 │   ├── base.py            # ToolProvider / ToolRouter abstractions
@@ -129,6 +132,39 @@ my_skill = Skill(
 
 agent = Agent(llm=llm, tools=[local], skills=[my_skill])
 ```
+
+### Custom ChatFormat (e.g. Hermes / Qwen3)
+
+The `LLMClient` owns a `ChatFormat` that handles all format-specific
+serialization and parsing. To support a different model format, implement
+`ChatFormat` and pass it when constructing the client:
+
+```python
+from agent_loop import ChatFormat, Message, ToolCall, ToolResult, ToolSpec
+
+class HermesChatFormat(ChatFormat):
+    def serialize_messages(self, messages, tools=None):
+        # Convert to Hermes prompt format
+        ...
+    def extract_tool_calls(self, raw_response):
+        # Parse <tool_call>JSON</tool_call> from raw text
+        ...
+    def extract_content(self, raw_response): ...
+    def extract_finish_reason(self, raw_response): ...
+    def extract_usage(self, raw_response): ...
+    def format_tool_result(self, result):
+        # Hermes uses <tool_response> inside a user message
+        return Message(role=Role.USER,
+                       content=f"<tool_response>{result.content}</tool_response>")
+
+agent = Agent(
+    llm=OpenAIClient(model="hermes-3", chat_format=HermesChatFormat()),
+    tools=[local],
+)
+```
+
+The Agent itself never touches format-specific logic — it only operates on
+internal types (`Message`, `ToolSpec`, `ToolCall`, `ToolResult`).
 
 ### Using the Factory
 
@@ -206,6 +242,9 @@ Add an entry to `configs/mcp_servers.json`:
 | `model` | string | `"gpt-4o"` | LLM model name |
 | `max_iterations` | int | `20` | Max agent loop iterations before forced stop |
 | `max_context_messages` | int | `100` | Sliding window for message history |
+| `max_tool_response_length` | int \| None | `None` | Truncate tool responses exceeding this character length. `None` = no truncation |
+| `tool_response_truncate_side` | string | `"middle"` | Which part to keep: `"left"`, `"right"`, or `"middle"` |
+| `max_parallel_tool_calls` | int \| None | `None` | Max concurrent tool executions (semaphore). `None` = unlimited |
 
 ## Requirements
 

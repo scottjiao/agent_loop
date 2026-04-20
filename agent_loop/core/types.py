@@ -114,6 +114,13 @@ class AgentConfig:
     system_prompt: str = "You are a helpful assistant."
     dry_run: bool = False
 
+    # Tool response truncation — applied as a final safeguard after hooks.
+    max_tool_response_length: int | None = None  # None = no truncation
+    tool_response_truncate_side: str = "middle"  # "left" | "right" | "middle"
+
+    # Parallel tool execution — semaphore-based concurrency limit.
+    max_parallel_tool_calls: int | None = None  # None = unlimited
+
 
 @dataclass
 class TransitionRecord:

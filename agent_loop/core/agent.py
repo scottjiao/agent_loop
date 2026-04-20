@@ -171,10 +171,11 @@ class Agent:
         if self.config.dry_run:
             import json as _json
 
-            messages = self.context.to_openai_messages()
+            messages = self.context.messages_with_system_prompt()
             tools = self.router.tool_specs or []
+            chat_fmt = self.llm.chat_format
             self.dry_run_payload = {
-                "messages": messages,
+                "messages": chat_fmt.serialize_messages(messages, tools),
                 "tools": [t.to_openai_schema() for t in tools],
             }
             print("\n" + "=" * 70)
@@ -185,9 +186,10 @@ class Agent:
             await self.sm.transition(State.FINISHED)
             return
 
-        # Call LLM (default behavior).
+        # Call LLM (default behavior) — passes internal types; the LLMClient
+        # uses its chat_format to serialize.
         response = await self.llm.chat(
-            messages=self.context.to_openai_messages(),
+            messages=self.context.messages_with_system_prompt(),
             tools=self.router.tool_specs or None,
         )
         self._last_response = response
@@ -232,7 +234,9 @@ class Agent:
             return
 
         # Execute tools (default behavior).
-        results = await self.router.execute_many(tool_calls)
+        results = await self.router.execute_many(
+            tool_calls, max_concurrency=self.config.max_parallel_tool_calls,
+        )
 
         # AFTER_ACT hook — plugins can inspect/modify tool results.
         ctx = await self.hooks.emit(
@@ -261,7 +265,14 @@ class Agent:
 
         if not ctx.is_default_prevented:
             for r in results:
-                self.context.add_tool_result(r)
+                r = ToolResult(
+                    tool_call_id=r.tool_call_id,
+                    name=r.name,
+                    content=self._truncate_tool_response(r.content),
+                    is_error=r.is_error,
+                )
+                msg = self.llm.chat_format.format_tool_result(r)
+                self.context.add_message(msg)
 
         self._pending_results = []
         await self.sm.transition(State.REFLECTING)
@@ -286,6 +297,20 @@ class Agent:
             await self.sm.transition(State.PLANNING)
 
     # -- Helpers ------------------------------------------------------------
+
+    def _truncate_tool_response(self, content: str) -> str:
+        """Truncate tool response content based on config. Final safeguard after hooks."""
+        max_len = self.config.max_tool_response_length
+        if max_len is None or len(content) <= max_len:
+            return content
+        side = self.config.tool_response_truncate_side
+        if side == "left":
+            return content[:max_len] + "...(truncated)"
+        elif side == "right":
+            return "(truncated)..." + content[-max_len:]
+        else:  # middle
+            half = max_len // 2
+            return content[:half] + "...(truncated)..." + content[-half:]
 
     def _accumulate_usage(self, usage: dict[str, int]) -> None:
         for k, v in usage.items():

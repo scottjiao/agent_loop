@@ -1,6 +1,7 @@
 """A generic, state-machine-driven agent loop template."""
 
 from agent_loop.core.types import State, ToolSpec, ToolResult, ToolCall, Message, Role
+from agent_loop.core.chat_format import ChatFormat, OpenAIChatFormat
 from agent_loop.core.hooks import HookPoint, HookContext, HookRegistry, HookHandler
 from agent_loop.core.state_machine import StateMachine
 from agent_loop.core.context import Context
@@ -18,6 +19,8 @@ __all__ = [
     "ToolCall",
     "Message",
     "Role",
+    "ChatFormat",
+    "OpenAIChatFormat",
     "HookPoint",
     "HookContext",
     "HookRegistry",

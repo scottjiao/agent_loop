@@ -92,8 +92,24 @@ class ToolRouter:
                 is_error=True,
             )
 
-    async def execute_many(self, calls: list[ToolCall]) -> list[ToolResult]:
-        """Execute multiple tool calls concurrently."""
+    async def execute_many(
+        self, calls: list[ToolCall], max_concurrency: int | None = None,
+    ) -> list[ToolResult]:
+        """Execute multiple tool calls concurrently.
+
+        When *max_concurrency* is set, uses an ``asyncio.Semaphore`` to limit
+        how many calls run in parallel — excess calls queue up and wait for a
+        slot (resource-pool pattern).  All calls will eventually execute.
+        """
         import asyncio
 
-        return list(await asyncio.gather(*(self.execute(c) for c in calls)))
+        if max_concurrency is None or max_concurrency <= 0:
+            return list(await asyncio.gather(*(self.execute(c) for c in calls)))
+
+        semaphore = asyncio.Semaphore(max_concurrency)
+
+        async def _limited(call: ToolCall) -> ToolResult:
+            async with semaphore:
+                return await self.execute(call)
+
+        return list(await asyncio.gather(*(_limited(c) for c in calls)))

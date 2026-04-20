@@ -6,6 +6,7 @@ import abc
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent_loop.core.chat_format import ChatFormat
 from agent_loop.core.types import Message, ToolCall, ToolSpec
 
 
@@ -20,20 +21,27 @@ class LLMResponse:
 
 
 class LLMClient(abc.ABC):
-    """Abstract interface for calling an LLM."""
+    """Abstract interface for calling an LLM.
+
+    Each concrete client owns a ``ChatFormat`` that handles all
+    format-specific serialization and parsing.
+    """
+
+    chat_format: ChatFormat
 
     @abc.abstractmethod
     async def chat(
         self,
-        messages: list[dict[str, Any]],
+        messages: list[Message],
         tools: list[ToolSpec] | None = None,
     ) -> LLMResponse:
         """Send messages to the LLM and return a response.
 
         Parameters
         ----------
-        messages : list[dict]
-            OpenAI-format message dicts.
+        messages : list[Message]
+            Internal Message objects.  The concrete client uses its
+            ``chat_format`` to serialize them into the provider's format.
         tools : list[ToolSpec] | None
-            Available tools (passed as function schemas to the model).
+            Available tools (serialized by ``chat_format``).
         """
