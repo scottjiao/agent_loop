@@ -1,0 +1,6 @@
+{
+    "system_prompt": "You are a helpful assistant with access to tools.",
+    "model": "gpt-4o",
+    "max_iterations": 20,
+    "max_context_messages": 100
+}

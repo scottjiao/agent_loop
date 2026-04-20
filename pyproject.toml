@@ -1,0 +1,14 @@
+[project]
+name = "agent-loop"
+version = "0.1.0"
+description = "A generic, state-machine-driven agent loop template."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+openai = ["openai>=1.0"]
+dev = ["pytest", "pytest-asyncio"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
