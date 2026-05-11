@@ -176,7 +176,7 @@ class Agent:
             chat_fmt = self.llm.chat_format
             self.dry_run_payload = {
                 "messages": chat_fmt.serialize_messages(messages, tools),
-                "tools": [t.to_openai_schema() for t in tools],
+                "tools": chat_fmt.serialize_tool_schemas(tools),
             }
             print("\n" + "=" * 70)
             print("  DRY RUN — payload that would be sent to LLM")
