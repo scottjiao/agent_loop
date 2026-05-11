@@ -41,6 +41,10 @@ class Context:
     def messages(self) -> list[Message]:
         return list(self._messages)
 
+    def replace_messages(self, messages: list[Message]) -> None:
+        """Replace conversation history while preserving context-owned metadata."""
+        self._messages = list(messages)
+
     @property
     def last_assistant_message(self) -> Message | None:
         for msg in reversed(self._messages):

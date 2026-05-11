@@ -8,6 +8,7 @@ from typing import Any
 from agent_loop.core.context import Context
 from agent_loop.core.hooks import HookPoint, HookRegistry
 from agent_loop.core.state_machine import StateMachine
+from agent_loop.core.compaction import ContextCompactor
 from agent_loop.core.types import AgentConfig, Message, Role, State, ToolResult
 from agent_loop.llm.base import LLMClient, LLMResponse
 from agent_loop.skills.base import SkillManager
@@ -46,6 +47,11 @@ class Agent:
         self.sm = state_machine or StateMachine()
         self.context = Context(self.config)
         self.router = ToolRouter(tools)
+        self.compactor = (
+            ContextCompactor(self.llm, self.config.compaction)
+            if self.config.compaction is not None
+            else None
+        )
 
         # Hook registry is shared between agent and skill manager.
         self.hooks = HookRegistry()
@@ -146,6 +152,9 @@ class Agent:
 
     async def _handle_planning(self) -> None:
         """Call the LLM to decide next action (or produce final answer)."""
+        if self.compactor is not None:
+            await self.compactor.compact_if_needed(self.context)
+
         # Collect skill instructions.
         instructions = self.skill_manager.collect_instructions(State.PLANNING)
         self.context.set_skill_instructions(instructions)

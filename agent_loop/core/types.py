@@ -106,6 +106,19 @@ class Message:
 
 
 @dataclass
+class CompactionConfig:
+    """Configuration for generic conversation-history compaction."""
+
+    trigger_message_count: int = 80
+    keep_recent_messages: int = 30
+    summary_prompt: str = (
+        "Summarize the older conversation history into compact durable memory. "
+        "Preserve decisions, constraints, unresolved tasks, tool results that matter, "
+        "and user preferences. Do not add new facts."
+    )
+
+
+@dataclass
 class AgentConfig:
     """Configuration for the agent loop."""
 
@@ -120,6 +133,10 @@ class AgentConfig:
 
     # Parallel tool execution — semaphore-based concurrency limit.
     max_parallel_tool_calls: int | None = None  # None = unlimited
+
+    # Generic conversation compaction. The agent calls the configured LLM to
+    # summarize older messages once the history crosses the threshold.
+    compaction: CompactionConfig | None = None
 
 
 @dataclass
